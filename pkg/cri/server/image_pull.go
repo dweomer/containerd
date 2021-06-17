@@ -373,23 +373,30 @@ func (c *criService) registryHosts(ctx context.Context, auth *runtime.AuthConfig
 				if err != nil {
 					return nil, errors.Wrapf(err, "get TLSConfig for registry %q", e)
 				}
+			} else if isLocalHost(host) && u.Scheme == "http" {
+				// Skipping TLS verification for localhost
+				transport.TLSClientConfig.InsecureSkipVerify = true
 			}
 
+			// Make a copy of `auth`, so that different authorizers would not reference
+			// the same auth variable.
+			auth := auth
 			if auth == nil && config.Auth != nil {
 				auth = toRuntimeAuthConfig(*config.Auth)
 			}
+			authorizer := docker.NewDockerAuthorizer(
+				docker.WithAuthClient(client),
+				docker.WithAuthCreds(func(host string) (string, string, error) {
+					return ParseAuth(auth, host)
+				}))
 
 			if u.Path == "" {
 				u.Path = "/v2"
 			}
 
 			registries = append(registries, docker.RegistryHost{
-				Client: client,
-				Authorizer: docker.NewDockerAuthorizer(
-					docker.WithAuthClient(client),
-					docker.WithAuthCreds(func(host string) (string, string, error) {
-						return ParseAuth(auth, host)
-					})),
+				Client:       client,
+				Authorizer:   authorizer,
 				Host:         u.Host,
 				Scheme:       u.Scheme,
 				Path:         u.Path,
@@ -402,13 +409,24 @@ func (c *criService) registryHosts(ctx context.Context, auth *runtime.AuthConfig
 
 // defaultScheme returns the default scheme for a registry host.
 func defaultScheme(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+	if isLocalHost(host) {
 		return "http"
 	}
 	return "https"
+}
+
+// isLocalHost checks if the registry host is local.
+func isLocalHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	if host == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	return ip.IsLoopback()
 }
 
 // addDefaultScheme returns the endpoint with default scheme
